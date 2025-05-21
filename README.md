@@ -1,7 +1,7 @@
 # Persistent Cache for Rust
 
 [![Crates.io](https://img.shields.io/crates/v/cache-ro)](https://crates.io/crates/cache-ro)
-[![Documentation](https://docs.rs/cache-ro/badge.svg)](https://docs.rs/persistent-cache-ro)
+[![Documentation](https://docs.rs/cache-ro/badge.svg)](https://docs.rs/cache-ro)
 [![License](https://img.shields.io/crates/l/cache-ro)](LICENSE)
 
 A high-performance, thread-safe persistent cache with TTL support.
