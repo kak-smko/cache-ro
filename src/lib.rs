@@ -36,12 +36,12 @@
 use bincode::config::{BigEndian, Configuration};
 use bincode::serde::{decode_from_slice, encode_to_vec};
 use dashmap::DashMap;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, read_dir, File, OpenOptions};
 use std::io::{Read, Write};
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -52,6 +52,7 @@ fn now() -> u128 {
         .expect("Time went backwards")
         .as_millis()
 }
+
 #[derive(Serialize, Deserialize)]
 struct CacheEntry {
     value: Vec<u8>,
@@ -82,11 +83,14 @@ impl Default for CacheConfig {
     }
 }
 
+lazy_static! {
+    static ref ENTRIES: DashMap<String, CacheEntry> = DashMap::new();
+    static ref KEY_LOCKS: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
+    static ref FILE_LOCKS: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
+}
+
 #[derive(Clone)]
 pub struct Cache {
-    entries: Arc<DashMap<String, CacheEntry>>,
-    key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
-    file_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     config: CacheConfig,
 }
 
@@ -115,12 +119,7 @@ impl Cache {
             fs::create_dir_all(&config.dir_path)?;
         }
 
-        let cache = Self {
-            entries: Arc::new(DashMap::new()),
-            key_locks: Arc::new(DashMap::new()),
-            file_locks: Arc::new(DashMap::new()),
-            config,
-        };
+        let cache = Self { config };
 
         if cache.config.persistent {
             cache.load_persistent_data()?;
@@ -141,12 +140,11 @@ impl Cache {
             let path = entry.path();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("bin") {
                 let file_key = path.to_string_lossy().to_string();
-                let file_lock = self
-                    .file_locks
+                let file_lock = FILE_LOCKS
                     .entry(file_key)
-                    .or_insert(Arc::new(Mutex::new(())))
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
                     .clone();
-                let _guard = file_lock.lock();
+                let _guard = file_lock.lock().unwrap();
 
                 let mut file = File::open(&path)?;
                 let mut buffer = Vec::new();
@@ -156,14 +154,13 @@ impl Cache {
                     decode_from_slice(&buffer, Self::config())?.0;
 
                 for (key, entry) in persistent_cache {
-                    let key_lock = self
-                        .key_locks
+                    let key_lock = KEY_LOCKS
                         .entry(key.clone())
-                        .or_insert(Arc::new(Mutex::new(())))
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
                         .clone();
-                    let _guard = key_lock.lock();
+                    let _guard = key_lock.lock().unwrap();
 
-                    self.entries.insert(
+                    ENTRIES.insert(
                         key,
                         CacheEntry {
                             value: entry.value,
@@ -178,23 +175,24 @@ impl Cache {
 
     fn cleanup(&self) {
         let now = now();
-        let mut rm =vec![];
-        for i in self.entries.iter() {
+        let mut rm = vec![];
+        for i in ENTRIES.iter() {
             if i.expires_at <= now {
                 rm.push(i.key().to_string());
             }
         }
-        for key in rm{
-            let _=self.remove(&key);
+        for key in rm {
+            let _ = self.remove(&key);
         }
     }
 
     pub fn get_key_lock(&self, key: &str) -> Arc<Mutex<()>> {
-        self.key_locks
+        KEY_LOCKS
             .entry(key.to_string())
-            .or_insert(Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
+
     pub fn set<V: Serialize>(
         &self,
         key: &str,
@@ -204,17 +202,13 @@ impl Cache {
         let serialized = encode_to_vec(&value, Self::config())?;
         let expires_at = now() + ttl.as_millis();
 
-        // Get or create key-specific lock
-        let key_lock = self
-            .key_locks
+        let key_lock = KEY_LOCKS
             .entry(key.to_string())
-            .or_insert(Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
-        // Acquire lock for this key
-        let _guard = key_lock.lock();
+        let _guard = key_lock.lock().unwrap();
 
-        // Insert into cache
-        self.entries.insert(
+        ENTRIES.insert(
             key.to_string(),
             CacheEntry {
                 value: serialized,
@@ -222,7 +216,6 @@ impl Cache {
             },
         );
 
-        // Persist if enabled
         if self.config.persistent {
             self.persist_key(key)?;
         }
@@ -239,8 +232,7 @@ impl Cache {
         let serialized = encode_to_vec(&value, Self::config())?;
         let expires_at = now() + ttl.as_millis();
 
-        // Insert into cache
-        self.entries.insert(
+        ENTRIES.insert(
             key.to_string(),
             CacheEntry {
                 value: serialized,
@@ -248,28 +240,24 @@ impl Cache {
             },
         );
 
-        // Persist if enabled
         if self.config.persistent {
             self.persist_key(key)?;
         }
 
         Ok(())
     }
+
     fn persist_key(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
         let file_path = self.get_file_path(key);
         let file_key = file_path.to_string_lossy().to_string();
 
-        // Get or create file lock
-        let file_lock = self
-            .file_locks
+        let file_lock = FILE_LOCKS
             .entry(file_key)
-            .or_insert(Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
 
-        // Acquire file lock
-        let _guard = file_lock.lock();
+        let _guard = file_lock.lock().unwrap();
 
-        // Load existing entries from file
         let mut persistent_entries = if file_path.exists() {
             let mut file = File::open(&file_path)?;
             let mut buffer = Vec::new();
@@ -280,8 +268,7 @@ impl Cache {
             HashMap::new()
         };
 
-        // Update with current entry
-        if let Some(entry) = self.entries.get(key) {
+        if let Some(entry) = ENTRIES.get(key) {
             persistent_entries.insert(
                 key.to_string(),
                 CacheEntry {
@@ -293,11 +280,13 @@ impl Cache {
             persistent_entries.remove(key);
         }
 
-        if persistent_entries.len() == 0 {
-            fs::remove_file(file_path)?;
+        if persistent_entries.is_empty() {
+            if file_path.exists() {
+                fs::remove_file(file_path)?;
+            }
             return Ok(());
         }
-        // Save back to file
+
         let persistent_cache = PersistentCache {
             entries: persistent_entries,
         };
@@ -315,7 +304,7 @@ impl Cache {
 
     pub fn get<V: for<'de> Deserialize<'de>>(&self, key: &str) -> Option<V> {
         let now = now();
-        self.entries.get(key).and_then(|entry| {
+        ENTRIES.get(key).and_then(|entry| {
             if entry.expires_at > now {
                 decode_from_slice(&entry.value, Self::config())
                     .ok()
@@ -327,44 +316,39 @@ impl Cache {
     }
 
     pub fn expire(&self, key: &str) -> Option<Duration> {
-        let entries = self.entries.deref();
         let now = now();
-        entries.get(key).and_then(|entry| {
-            let a = entry.expires_at - now;
-            if entry.expires_at > 0 {
-                Some(Duration::from_millis(a as u64))
+        ENTRIES.get(key).and_then(|entry| {
+            if entry.expires_at > now {
+                let remaining = entry.expires_at - now;
+                Some(Duration::from_millis(remaining as u64))
             } else {
                 None
             }
         })
     }
+
     pub fn remove(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
         {
-            // Get key lock
-            let key_lock = self
-                .key_locks
+            let key_lock = KEY_LOCKS
                 .entry(key.to_string())
-                .or_insert(Arc::new(Mutex::new(())))
+                .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone();
-            let _guard = key_lock.lock();
+            let _guard = key_lock.lock().unwrap();
 
-            // Remove from memory
-            self.entries.remove(key);
+            ENTRIES.remove(key);
 
-            // Remove from persistent storage if enabled
             if self.config.persistent {
                 self.persist_key(key)?;
             }
         }
-        self.key_locks.remove(key);
+        KEY_LOCKS.remove(key);
 
         Ok(())
     }
-    pub fn remove_without_guard(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Remove from memory
-        self.entries.remove(key);
 
-        // Remove from persistent storage if enabled
+    pub fn remove_without_guard(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
+        ENTRIES.remove(key);
+
         if self.config.persistent {
             self.persist_key(key)?;
         }
@@ -373,11 +357,10 @@ impl Cache {
     }
 
     pub fn clear(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Clear memory cache
-        self.entries.clear();
-        self.key_locks.clear();
-        self.file_locks.clear();
-        // Clear persistent storage if enabled
+        ENTRIES.clear();
+        KEY_LOCKS.clear();
+        FILE_LOCKS.clear();
+
         if self.config.persistent {
             for entry in read_dir(&self.config.dir_path)? {
                 let entry = entry?;
@@ -392,10 +375,10 @@ impl Cache {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        ENTRIES.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        ENTRIES.is_empty()
     }
 }
