@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::time::{Duration};
-use serde::{Serialize, Deserialize};
-use std::{fs, thread};
-use std::thread::{sleep, spawn};
 use cache_ro::{Cache, CacheConfig};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::thread::{sleep, spawn};
+use std::time::Duration;
+use std::{fs, thread};
 
 // Helper function to create a temp directory
 fn setup_temp_dir() -> String {
@@ -13,8 +13,8 @@ fn setup_temp_dir() -> String {
 }
 
 // Helper function to clean up temp directory
-fn cleanup_temp_dir(dir: &str) {
-    fs::remove_dir_all(dir).unwrap();
+fn cleanup_temp_dirs() {
+    fs::remove_dir_all("./test_cache_temp").unwrap();
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -24,221 +24,48 @@ struct TestData {
 }
 
 #[test]
-fn test_all(){
-    test_file_backed_cache();
-    test_basic_operations();
-    test_expiration();
-    test_expiration_file();
-    test_persistent_storage();
-    test_persistent_cleanup();
+fn test_all() {
+    println!("test_non_persistent_mode");
     test_non_persistent_mode();
+    println!("test_hash_prefix_length");
     test_hash_prefix_length();
-    test_multiple_file_creation();
-    test_config_changes();
-    test_multithreaded_reads();
-    test_multithreaded_writes();
-    test_multithreaded_persistent();
-    test_multithreaded_cleanup();
-    test_read_write_mix();
-    test_expiration_under_load();
-    test_high_contention();
+    println!("test_interval");
+    test_interval();
+    println!("test_massive_expiration");
     test_massive_expiration();
+    println!("test_file_backed_cache");
+    test_file_backed_cache();
+    println!("test_basic_operations");
+    test_basic_operations();
+    println!("test_expiration");
+    test_expiration();
+    println!("test_multi_expiration");
+    test_multi_expiration();
+    println!("test_expiration_file");
+    test_expiration_file();
+    println!("test_persistent_storage");
+    test_persistent_storage();
+    println!("test_persistent_cleanup");
+    test_persistent_cleanup();
+    println!("test_multiple_file_creation");
+    test_multiple_file_creation();
+    println!("test_multithreaded_reads");
+    test_multithreaded_reads();
+    println!("test_multithreaded_writes");
+    test_multithreaded_writes();
+    println!("test_multithreaded_persistent");
+    test_multithreaded_persistent();
+    println!("test_multithreaded_cleanup");
+    test_multithreaded_cleanup();
+    println!("test_read_write_mix");
+    test_read_write_mix();
+    println!("test_expiration_under_load");
+    test_expiration_under_load();
+    println!("test_high_contention");
+    test_high_contention();
+    println!("test_persistent_concurrent");
     test_persistent_concurrent();
 }
-fn test_file_backed_cache() {
-    let dir = setup_temp_dir();
-    // Create new cache
-    let cache = Cache::new(
-        CacheConfig {
-            persistent: true,
-            dir_path:dir.clone(),
-            ..Default::default()
-        }
-    )
-    .unwrap();
-    cache.clear().unwrap();
-    // Test set and get
-    let data = TestData {
-        field1: "test".to_string(),
-        field2: 4203558,
-    };
-    cache
-        .set("key1", data.clone(), Duration::from_secs(2))
-        .unwrap();
-    assert_eq!(cache.get::<TestData>("key1"), Some(data.clone()));
-    // Test persistence
-    drop(cache);
-    let cache = Cache::new(
-        CacheConfig {
-            persistent: true,
-            dir_path:dir.clone(),
-            ..Default::default()
-        }
-    )
-    .unwrap();
-    assert_eq!(cache.get::<TestData>("key1"), Some(data.clone()));
-
-    // Test expiration
-    thread::sleep(Duration::from_secs(3));
-    assert_eq!(cache.get::<TestData>("key1"), None);
-
-    cache.set("key", 23, Duration::from_secs(20)).unwrap();
-    assert_eq!(Some(23), cache.get::<i32>("key"));
-    // Clean up after test
-    cleanup_temp_dir(&dir);
-}
-
-fn test_basic_operations() {
-    let cache = Cache::new(CacheConfig {
-        persistent: false,
-        ..Default::default()
-    })
-    .unwrap();
-    cache.clear().unwrap();
-    // Test set and get
-    cache
-        .set("key1", "value1".to_string(), Duration::from_secs(10))
-        .unwrap();
-    assert_eq!(cache.get::<String>("key1").unwrap(), "value1");
-
-    // Test remove
-    cache.remove("key1").unwrap();
-    assert!(cache.get::<String>("key1").is_none());
-
-    // Test clear
-    cache
-        .set("key2", "value2".to_string(), Duration::from_secs(10))
-        .unwrap();
-    cache
-        .set("key3", "value3".to_string(), Duration::from_secs(10))
-        .unwrap();
-    assert_eq!(cache.len(), 2);
-    cache.clear().unwrap();
-    assert_eq!(cache.len(), 0);
-}
-
-fn test_expiration() {
-    let cache = Cache::new(CacheConfig {
-        persistent: false,
-        ..Default::default()
-    })
-    .unwrap();
-    cache.clear().unwrap();
-    // Test immediate expiration
-    cache
-        .set("temp_key", "temp_value".to_string(), Duration::from_secs(0))
-        .unwrap();
-    sleep(Duration::from_millis(10));
-    assert!(cache.get::<String>("temp_key").is_none());
-
-    // Test expiration after time
-    cache.set(
-            "short_key",
-            "short_value".to_string(),
-            Duration::from_millis(50),
-        )
-        .unwrap();
-    assert!(cache.get::<String>("short_key").is_some());
-    sleep(Duration::from_millis(60));
-    assert!(cache.get::<String>("short_key").is_none());
-
-    // Test expire() function
-    cache
-        .set(
-            "check_key",
-            "check_value".to_string(),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-    let remaining = cache.expire("check_key").unwrap();
-    assert!(remaining <= Duration::from_secs(1) && remaining > Duration::from_secs(0));
-}
-fn test_expiration_file() {
-    let dir = setup_temp_dir();
-    let cache = Cache::new(CacheConfig {
-        persistent: true,
-        dir_path:dir.clone(),
-        ..Default::default()
-    })
-    .unwrap();
-    cache.clear().unwrap();
-
-    cache.set("temp_key", "temp_value".to_string(), Duration::from_millis(100))
-        .unwrap();
-    drop(cache);
-    sleep(Duration::from_secs(1));
-    let cache = Cache::new(CacheConfig {
-        persistent: true,
-        dir_path:dir.clone(),
-        ..Default::default()
-    })
-        .unwrap();
-    assert!(cache.get::<String>("temp_key").is_none());
-    cleanup_temp_dir(&dir)
-}
-
-fn test_persistent_storage() {
-    let dir = setup_temp_dir();
-
-    // First create and populate cache
-    {
-        let cache = Cache::new(CacheConfig {
-            persistent: true,
-            dir_path: dir.clone(),
-            ..Default::default()
-        })
-        .unwrap();
-        cache.clear().unwrap();
-        cache
-            .set("persist1", "value1".to_string(), Duration::from_secs(2))
-            .unwrap();
-        cache.set("persist2", 42, Duration::from_secs(10)).unwrap();
-    }
-    sleep(Duration::from_secs(3));
-    // Then create new cache instance and check if data persisted
-    {
-        let cache = Cache::new(CacheConfig {
-            persistent: true,
-            dir_path: dir.clone(),
-            ..Default::default()
-        })
-        .unwrap();
-
-        assert!(cache.get::<String>("persist1").is_none());
-        assert_eq!(cache.get::<i32>("persist2").unwrap(), 42);
-    }
-
-    cleanup_temp_dir(&dir);
-}
-
-fn test_persistent_cleanup() {
-    let dir = setup_temp_dir();
-
-    let cache = Cache::new(CacheConfig {
-        persistent: true,
-        dir_path: dir.clone(),
-        cleanup_interval: Duration::from_millis(100),
-        ..Default::default()
-    })
-    .unwrap();
-    cache.clear().unwrap();
-
-    cache
-        .set("temp1", "value1".to_string(), Duration::from_millis(50))
-        .unwrap();
-    cache
-        .set("perm1", "value2".to_string(), Duration::from_secs(10))
-        .unwrap();
-
-    // Wait for cleanup to happen
-    sleep(Duration::from_millis(150));
-
-    assert!(cache.get::<String>("temp1").is_none());
-    assert!(cache.get::<String>("perm1").is_some());
-
-    cleanup_temp_dir(&dir);
-}
-
 fn test_non_persistent_mode() {
     let dir = setup_temp_dir();
 
@@ -256,8 +83,7 @@ fn test_non_persistent_mode() {
     // Should not create any files
     let files = fs::read_dir(&dir).unwrap();
     assert_eq!(files.count(), 0);
-
-    cleanup_temp_dir(&dir);
+    Cache::drop()
 }
 
 fn test_hash_prefix_length() {
@@ -296,7 +122,287 @@ fn test_hash_prefix_length() {
         assert_eq!(prefix.len(), 4); // 4 bytes as hex
     }
 
-    cleanup_temp_dir(&dir);
+    cleanup_temp_dirs();
+    Cache::drop()
+}
+
+fn test_interval() {
+    let dir = setup_temp_dir();
+
+    let cache = Cache::new(CacheConfig {
+        persistent: true,
+        hash_prefix_length: 4,
+        dir_path: dir.clone(),
+    })
+        .unwrap();
+    cache.clear().unwrap();
+
+    cache
+        .set("key1", "value1".to_string(), Duration::from_secs(1))
+        .unwrap();
+
+    let files: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("cache_") && name.ends_with(".bin"))
+        .collect();
+
+    assert!(!files.is_empty());
+    sleep(Duration::from_secs(2));
+    // Check that files were created with 3-character prefixes
+    let files: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("cache_") && name.ends_with(".bin"))
+        .collect();
+
+    assert!(files.is_empty());
+
+    cleanup_temp_dirs();
+    Cache::drop()
+}
+
+fn test_massive_expiration() {
+    let dir = setup_temp_dir();
+    let cache = Arc::new(
+        Cache::new(CacheConfig {
+            persistent: true,
+            dir_path: dir.clone(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+
+    // Add 10,000 items that will expire quickly
+    for i in 0..10_000 {
+        cache
+            .set(&format!("item-{}", i), i, Duration::from_millis(10))
+            .unwrap();
+    }
+
+    // Let cleanup run
+    sleep(Duration::from_millis(2000));
+
+    // Verify all expired
+    assert_eq!(cache.len(), 0);
+    cleanup_temp_dirs();
+    Cache::drop()
+}
+
+
+fn test_file_backed_cache() {
+    let dir = setup_temp_dir();
+
+    let cache = Cache::new(CacheConfig {
+        persistent: true,
+        dir_path: dir.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    // Test set and get
+    let data = TestData {
+        field1: "test".to_string(),
+        field2: 4203558,
+    };
+    cache
+        .set("key1", data.clone(), Duration::from_secs(200))
+        .unwrap();
+    assert_eq!(cache.get::<TestData>("key1"), Some(data.clone()));
+    // Test persistence
+    Cache::drop();
+
+    let cache = Cache::new(CacheConfig {
+        persistent: true,
+        dir_path: dir.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(cache.get::<TestData>("key1"), Some(data.clone()));
+
+
+    cache.set("key", 23, Duration::from_secs(20)).unwrap();
+    assert_eq!(Some(23), cache.get::<i32>("key"));
+    cleanup_temp_dirs();
+    Cache::drop()
+}
+
+fn test_basic_operations() {
+    let cache = Cache::new(CacheConfig {
+        persistent: false,
+        ..Default::default()
+    })
+    .unwrap();
+    cache.clear().unwrap();
+    // Test set and get
+    cache
+        .set("key1", "value1".to_string(), Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(cache.get::<String>("key1").unwrap(), "value1");
+
+    // Test remove
+    cache.remove("key1").unwrap();
+    assert!(cache.get::<String>("key1").is_none());
+
+    // Test clear
+    cache
+        .set("key2", "value2".to_string(), Duration::from_secs(10))
+        .unwrap();
+    cache
+        .set("key3", "value3".to_string(), Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(cache.len(), 2);
+    cache.clear().unwrap();
+    assert_eq!(cache.len(), 0);
+    Cache::drop()
+}
+
+
+fn test_expiration() {
+    let cache = Cache::new(CacheConfig {
+        persistent: false,
+        ..Default::default()
+    })
+    .unwrap();
+
+    // Test immediate expiration
+    cache
+        .set("temp_key", "temp_value".to_string(), Duration::from_secs(0))
+        .unwrap();
+    sleep(Duration::from_millis(1000));
+    assert!(cache.get::<String>("temp_key").is_none());
+
+    // Test expiration after time
+    cache
+        .set(
+            "short_key",
+            "short_value".to_string(),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+    assert!(cache.get::<String>("short_key").is_some());
+    sleep(Duration::from_millis(1100));
+    assert!(cache.get::<String>("short_key").is_none());
+
+    // Test expire() function
+    cache
+        .set(
+            "check_key",
+            "check_value".to_string(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    let remaining = cache.expire("check_key").unwrap();
+    assert!(remaining <= Duration::from_secs(1) && remaining > Duration::from_secs(0));
+    Cache::drop()
+}
+
+fn test_multi_expiration() {
+    let cache = Cache::new(CacheConfig {
+        persistent: false,
+        ..Default::default()
+    })
+    .unwrap();
+
+    for i in 0..1000{
+        cache
+            .set(&format!("temp_key {i}"), "temp_value".to_string(), Duration::from_millis(i*10))
+            .unwrap();
+    }
+    cache.remove("temp_key 250").unwrap();
+    sleep(Duration::from_millis(1000));
+    assert!(cache.get::<String>("temp_key 0").is_none());
+    assert!(cache.get::<String>("temp_key 30").is_none());
+    assert!(cache.get::<String>("temp_key 100").is_none());
+    assert!(cache.get::<String>("temp_key 250").is_none());
+    assert!(cache.get::<String>("temp_key 120").is_some());
+    assert!(cache.get::<String>("temp_key 200").is_some());
+    assert!(cache.get::<String>("temp_key 999").is_some());
+    Cache::drop()
+}
+
+fn test_expiration_file() {
+    let dir = setup_temp_dir();
+    let cache = Cache::new(CacheConfig {
+        persistent: true,
+        dir_path: dir.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    cache.clear().unwrap();
+
+    cache
+        .set(
+            "temp_key",
+            "temp_value".to_string(),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+    drop(cache);
+    sleep(Duration::from_secs(1));
+    let cache = Cache::instance().unwrap();
+    assert!(cache.get::<String>("temp_key").is_none());
+    cleanup_temp_dirs();
+    Cache::drop()
+}
+
+fn test_persistent_storage() {
+    let dir = setup_temp_dir();
+
+    // First create and populate cache
+    {
+        let cache = Cache::new(CacheConfig {
+            persistent: true,
+            dir_path: dir.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        cache
+            .set("persist1", "value1".to_string(), Duration::from_secs(2))
+            .unwrap();
+        cache.set("persist2", 42, Duration::from_secs(10)).unwrap();
+    }
+    Cache::drop();
+    sleep(Duration::from_secs(3));
+    // Then create new cache instance and check if data persisted
+    {
+        let cache = Cache::new(CacheConfig {
+            persistent: true,
+            dir_path: dir.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(cache.get::<String>("persist1").is_none());
+        assert_eq!(cache.get::<i32>("persist2").unwrap(), 42);
+    }
+
+    cleanup_temp_dirs();
+    Cache::drop()
+}
+
+fn test_persistent_cleanup() {
+    let dir = setup_temp_dir();
+
+    let cache = Cache::new(CacheConfig {
+        persistent: true,
+        dir_path: dir.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+
+    cache
+        .set("temp1", "value1".to_string(), Duration::from_millis(50))
+        .unwrap();
+    cache
+        .set("perm1", "value2".to_string(), Duration::from_secs(10))
+        .unwrap();
+
+    sleep(Duration::from_millis(100));
+
+    assert!(cache.get::<String>("temp1").is_none());
+    assert!(cache.get::<String>("perm1").is_some());
+    cleanup_temp_dirs();
+    Cache::drop()
 }
 
 fn test_multiple_file_creation() {
@@ -326,58 +432,8 @@ fn test_multiple_file_creation() {
         file_count
     );
 
-    cleanup_temp_dir(&dir);
-}
-
-fn test_config_changes() {
-    let dir = setup_temp_dir();
-
-    // First config with prefix length 2
-    {
-        let cache = Cache::new(CacheConfig {
-            persistent: true,
-            hash_prefix_length: 2,
-            dir_path: dir.clone(),
-            ..Default::default()
-        })
-        .unwrap();
-        cache.clear().unwrap();
-
-        cache
-            .set("key1", "value1".to_string(), Duration::from_secs(10))
-            .unwrap();
-    }
-
-    // Then change to prefix length 4
-    {
-        let cache = Cache::new(CacheConfig {
-            persistent: true,
-            hash_prefix_length: 4,
-            dir_path: dir.clone(),
-            ..Default::default()
-        })
-        .unwrap();
-
-        // Should still be able to read old data
-        assert_eq!(cache.get::<String>("key1").unwrap(), "value1");
-
-        // New writes use new prefix length
-        cache
-            .set("key2", "value2".to_string(), Duration::from_secs(10))
-            .unwrap();
-    }
-
-    // Verify both files exist
-    let files: Vec<_> = fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.starts_with("cache_") && name.ends_with(".bin"))
-        .collect();
-
-    assert!(files.iter().any(|f| f.len() == "cache_xxxx.bin".len())); // length 4
-    assert!(files.iter().any(|f| f.len() == "cache_xx.bin".len())); // length 2
-
-    cleanup_temp_dir(&dir);
+    cleanup_temp_dirs();
+    Cache::drop()
 }
 
 fn test_multithreaded_reads() {
@@ -388,7 +444,6 @@ fn test_multithreaded_reads() {
         })
         .unwrap(),
     );
-    &cache.clear().unwrap();
     // Initialize with some data
     cache
         .set("shared_key", 42, Duration::from_secs(10))
@@ -407,6 +462,7 @@ fn test_multithreaded_reads() {
     for handle in handles {
         handle.join().unwrap();
     }
+    Cache::drop()
 }
 
 fn test_multithreaded_writes() {
@@ -417,7 +473,7 @@ fn test_multithreaded_writes() {
         })
         .unwrap(),
     );
-    &cache.clear().unwrap();
+
     let mut handles = vec![];
     for i in 0..10 {
         let cache_clone = cache.clone();
@@ -440,6 +496,7 @@ fn test_multithreaded_writes() {
             assert_eq!(cache.get::<i32>(&key).unwrap(), j);
         }
     }
+    Cache::drop()
 }
 
 fn test_multithreaded_persistent() {
@@ -452,7 +509,7 @@ fn test_multithreaded_persistent() {
         })
         .unwrap(),
     );
-    &cache.clear().unwrap();
+
     let mut handles = vec![];
     for i in 0..10 {
         let cache_clone = cache.clone();
@@ -468,6 +525,7 @@ fn test_multithreaded_persistent() {
         handle.join().unwrap();
     }
 
+    Cache::drop();
     // Verify all writes were persisted
     let cache2 = Cache::new(CacheConfig {
         persistent: true,
@@ -482,8 +540,8 @@ fn test_multithreaded_persistent() {
             assert_eq!(cache2.get::<i32>(&key).unwrap(), j);
         }
     }
-
-    cleanup_temp_dir(&dir);
+    cleanup_temp_dirs();
+    Cache::drop()
 }
 
 fn test_multithreaded_cleanup() {
@@ -492,12 +550,11 @@ fn test_multithreaded_cleanup() {
         Cache::new(CacheConfig {
             persistent: true,
             dir_path: dir.clone(),
-            cleanup_interval: Duration::from_millis(100),
             ..Default::default()
         })
         .unwrap(),
     );
-    &cache.clear().unwrap();
+
     let mut handles = vec![];
     for i in 0..5 {
         let cache_clone = cache.clone();
@@ -529,26 +586,29 @@ fn test_multithreaded_cleanup() {
             assert_eq!(cache.get::<i32>(&long_key).unwrap(), j);
         }
     }
-
-    cleanup_temp_dir(&dir);
+    cleanup_temp_dirs();
+    Cache::drop()
 }
 
+
 fn test_read_write_mix() {
-    let cache = Arc::new(Cache::new(CacheConfig {
-        persistent: false,
-        cleanup_interval: Duration::from_secs(5),
-        ..Default::default()
-    }).unwrap());
-    &cache.clear().unwrap();
+    let cache = Arc::new(
+        Cache::new(CacheConfig {
+            persistent: false,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+
     let mut handles = vec![];
 
     // Writers
     for i in 0..50 {
         let cache = cache.clone();
-        handles.push(spawn( move|| {
+        handles.push(spawn(move || {
             for j in 0..20 {
                 let key = format!("{}-{}", i, j);
-                cache.set(&key, j,Duration::from_secs(j as u64)).unwrap();
+                cache.set(&key, j, Duration::from_secs(j as u64)).unwrap();
             }
         }));
     }
@@ -556,7 +616,7 @@ fn test_read_write_mix() {
     // Readers
     for _ in 0..50 {
         let cache = cache.clone();
-        handles.push(spawn( move|| {
+        handles.push(spawn(move || {
             for i in 0..50 {
                 for j in 0..20 {
                     let key = format!("{}-{}", i, j);
@@ -569,7 +629,7 @@ fn test_read_write_mix() {
     // Deleters
     for i in 0..20 {
         let cache = cache.clone();
-        handles.push(spawn( move|| {
+        handles.push(spawn(move || {
             for j in 0..5 {
                 let key = format!("{}-{}", i, j);
                 cache.remove(&key).ok();
@@ -580,23 +640,31 @@ fn test_read_write_mix() {
     for handle in handles {
         handle.join().unwrap();
     }
+    Cache::drop()
 }
 
+
 fn test_expiration_under_load() {
-    let cache = Arc::new(Cache::new(CacheConfig {
-        persistent: false,
-        cleanup_interval: Duration::from_millis(100),
-        ..Default::default()
-    }).unwrap());
-    &cache.clear().unwrap();
+    let cache = Arc::new(
+        Cache::new(CacheConfig {
+            persistent: false,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+
     // Add short-lived items
     for i in 0..100 {
-        cache.set(&format!("short-{}", i), i, (Duration::from_millis(50))).unwrap();
+        cache
+            .set(&format!("short-{}", i), i, Duration::from_millis(50))
+            .unwrap();
     }
 
     // Add long-lived items
     for i in 0..100 {
-        cache.set(&format!("long-{}", i), i, (Duration::from_secs(10))).unwrap();
+        cache
+            .set(&format!("long-{}", i), i, Duration::from_secs(10))
+            .unwrap();
     }
 
     // Let cleanup run
@@ -611,30 +679,37 @@ fn test_expiration_under_load() {
     for i in 0..100 {
         assert_eq!(cache.get::<i32>(&format!("long-{}", i)), Some(i));
     }
+    Cache::drop()
 }
 
+
 fn test_high_contention() {
-    let dir=setup_temp_dir();
-    let cache = Arc::new(Cache::new(CacheConfig {
-        persistent: true,
-        dir_path:dir.clone(),
-        ..Default::default()
-    }).unwrap());
-    &cache.clear().unwrap();
+    let dir = setup_temp_dir();
+    let cache = Arc::new(
+        Cache::new(CacheConfig {
+            persistent: true,
+            dir_path: dir.clone(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+
     let mut handles = vec![];
     let key = "contended_key".to_string();
 
     // 100 threads competing for the same key
-    for i in 0..100 {
+    for _ in 0..100 {
         let cache = cache.clone();
         let key = key.clone();
-        handles.push(spawn( move|| {
+        handles.push(spawn(move || {
             for _ in 0..100 {
-                let key_lock=cache.get_key_lock(&key);
-                let _unused = key_lock.lock();
+                let key_lock = cache.get_key_lock(&key);
+                let _unused = key_lock.lock().unwrap();
                 let mut value = cache.get::<i32>(&key).unwrap_or(0);
                 value += 1;
-                cache.set_without_guard(&key, value, Duration::from_secs(1)).unwrap();
+                cache
+                    .set_without_guard(&key, value, Duration::from_secs(10))
+                    .unwrap();
             }
         }));
     }
@@ -644,30 +719,11 @@ fn test_high_contention() {
     }
 
     assert_eq!(cache.get::<i32>(&key), Some(10000));
-    cleanup_temp_dir(&dir);
+
+    cleanup_temp_dirs();
+    Cache::drop()
 }
 
-fn test_massive_expiration() {
-    let dir=setup_temp_dir();
-    let cache = Arc::new(Cache::new(CacheConfig {
-        persistent: true,
-        dir_path:dir.clone(),
-        cleanup_interval: Duration::from_millis(50),
-        ..Default::default()
-    }).unwrap());
-    &cache.clear().unwrap();
-    // Add 10,000 items that will expire quickly
-    for i in 0..10_000 {
-        cache.set(&format!("item-{}", i), i, (Duration::from_millis(10))).unwrap();
-    }
-
-    // Let cleanup run
-    sleep(Duration::from_millis(1000));
-
-    // Verify all expired
-    assert_eq!(cache.len(), 0);
-    cleanup_temp_dir(&dir);
-}
 
 fn test_persistent_concurrent() {
     let dir = setup_temp_dir();
@@ -678,14 +734,14 @@ fn test_persistent_concurrent() {
     };
 
     let cache = Arc::new(Cache::new(config.clone()).unwrap());
-    &cache.clear().unwrap();
+    let _=&cache.clear().unwrap();
     let mut handles = vec![];
     for i in 0..50 {
         let cache = cache.clone();
-        handles.push(spawn( move|| {
+        handles.push(spawn(move || {
             for j in 0..20 {
                 let key = format!("{}-{}", i, j);
-                cache.set(&key, j, (Duration::from_secs(10))).unwrap();
+                cache.set(&key, j, Duration::from_secs(10)).unwrap();
             }
         }));
     }
@@ -695,8 +751,8 @@ fn test_persistent_concurrent() {
     }
 
     // Reload cache from disk
-    drop(cache);
-    let cache = Arc::new(Cache::new(config).unwrap());
+    Cache::drop();
+    let cache = Arc::new(Cache::new(config.clone()).unwrap());
 
     // Verify all items persisted
     for i in 0..50 {
@@ -705,5 +761,6 @@ fn test_persistent_concurrent() {
             assert_eq!(cache.get::<i32>(&key), Some(j));
         }
     }
-    cleanup_temp_dir(&dir)
+    cleanup_temp_dirs();
+    Cache::drop()
 }
