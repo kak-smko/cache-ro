@@ -39,13 +39,13 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs::{self, read_dir, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now() -> u128 {
@@ -65,6 +65,7 @@ pub struct CacheConfig {
     pub persistent: bool,
     pub hash_prefix_length: usize,
     pub dir_path: String,
+    pub cleanup_interval: Duration,
 }
 
 impl Default for CacheConfig {
@@ -73,67 +74,40 @@ impl Default for CacheConfig {
             persistent: true,
             hash_prefix_length: 2,
             dir_path: "cache_data".to_string(),
+            cleanup_interval: Duration::from_secs(10),
         }
     }
 }
 
 lazy_static! {
     static ref ENTRIES: DashMap<String, (Vec<u8>,u128)> = DashMap::new();
-    static ref KEY_LOCKS: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
     static ref FILE_LOCKS: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
     static ref CACHE: RwLock<Option<Cache>> = RwLock::new(None);
-    static ref EXPIRATION_QUEUE: DashMap<String,u128> = DashMap::new();
     static ref CACHESTATE: AtomicU8 = AtomicU8::new(0);// 0 no run,1 running,2 in closing
     static ref CLEANUP_THREAD_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 }
 
-fn start_cleanup_thread(cache: Cache) -> JoinHandle<()>{
+fn start_cleanup_thread(cache: Cache) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut heap:BTreeMap<u128, Vec<String>>=BTreeMap::new();
         loop {
             if CACHESTATE.load(Ordering::SeqCst) != 1 {
                 CACHESTATE.store(0, Ordering::SeqCst);
                 break;
             }
-            let mut removes =vec![];
-            {
-                for item in EXPIRATION_QUEUE.iter() {
-                    heap.entry(*item.value()).or_default().push(item.key().clone());
-                    removes.push(item.key().clone());
-                }
-            }
-            for rm in removes{
-                EXPIRATION_QUEUE.remove(&rm).unwrap();
-            }
+            let now = now();
+            let expired_keys: Vec<String> = ENTRIES
+                .iter()
+                .filter(|entry| entry.1 <= now)
+                .map(|entry| entry.key().clone())
+                .collect();
 
-            if let Some((next_ts, _)) = heap.iter().next() {
-                let now_ms = now();
-                if next_ts > &now_ms {
-                    let sleep_ms = (next_ts - now_ms).min(5000);
-                    std::thread::sleep(Duration::from_millis(sleep_ms as u64));
-                    continue;
-                }
-                let now_ms = now();
-                let expired_ts: Vec<u128> = heap
-                    .iter()
-                    .take_while(|&(&ts, _)| ts <= now_ms)
-                    .map(|(&ts, _)| ts)
-                    .collect();
-                if expired_ts.is_empty() {
-                    break;
-                }
-                for ts in expired_ts {
-                    if let Some(keys) = heap.remove(&ts) {
-                        for key in keys {
-                            let _ = cache.remove(&key);
-                        }
-                    }
-                }
-            } else {
-                std::thread::sleep(Duration::from_secs(1));
+            for key in expired_keys {
+                let _ = cache.remove(&key);
             }
+            sleep(cache.config.cleanup_interval);
         }
-    })}
+    })
+}
 
 #[derive(Clone)]
 pub struct Cache {
@@ -141,7 +115,6 @@ pub struct Cache {
 }
 
 impl Cache {
-
     /// Drops the global cache instance and clears all in-memory entries, locks, and file locks.
     ///
     /// After calling this, [`Cache::instance`] will return an error until [`Cache::new`] is called again.
@@ -150,8 +123,8 @@ impl Cache {
         if let Some(handle) = CLEANUP_THREAD_HANDLE.lock().unwrap().take() {
             let _ = handle.join();
         }
+
         ENTRIES.clear();
-        KEY_LOCKS.clear();
         FILE_LOCKS.clear();
         let mut conf = CACHE.write().unwrap();
         *conf = None;
@@ -256,46 +229,16 @@ impl Cache {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer)?;
 
-                let persistent_cache: HashMap<String, (Vec<u8>,u128)> =
+                let persistent_cache: HashMap<String, (Vec<u8>, u128)> =
                     decode_from_slice(&buffer, Self::config())?.0;
 
-                for (key, (value,expires_at)) in persistent_cache {
-                    let key_lock = KEY_LOCKS
-                        .entry(key.clone())
-                        .or_insert_with(|| Arc::new(Mutex::new(())))
-                        .clone();
-                    let _guard = key_lock.lock().unwrap();
-
-                    ENTRIES.insert(key.clone(),  (value,expires_at));
-                    EXPIRATION_QUEUE.insert( key,expires_at);
+                for (key, (value, expires_at)) in persistent_cache {
+                    ENTRIES.insert(key.clone(), (value, expires_at));
                 }
             }
         }
         Ok(())
     }
-
-
-    /// Returns the per-key lock for the specified cache key.
-    ///
-    /// Useful when performing multiple operations atomically for a single key.
-    ///
-    /// # Arguments
-    /// * `key` - The key to lock.
-    ///
-    /// # Example
-    /// ```
-    /// let cache = cache_ro::Cache::new(Default::default()).unwrap();
-    /// let lock = cache.get_key_lock("my_key");
-    /// let _guard = lock.lock().unwrap();
-    /// // do protected work here
-    /// ```
-    pub fn get_key_lock(&self, key: &str) -> Arc<Mutex<()>> {
-        KEY_LOCKS
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
 
     /// Stores a value in the cache with a specified TTL (time-to-live).
     ///
@@ -317,43 +260,8 @@ impl Cache {
         let serialized = encode_to_vec(&value, Self::config())?;
         let expires_at = now() + ttl.as_millis();
 
-        let key_lock = KEY_LOCKS
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let _guard = key_lock.lock().unwrap();
+        ENTRIES.insert(key.to_string(), (serialized, expires_at));
 
-        ENTRIES.insert(key.to_string(), (serialized,expires_at));
-        EXPIRATION_QUEUE.insert( key.to_string(),expires_at);
-        if self.config.persistent {
-            self.persist_key(key)?;
-        }
-
-        Ok(())
-    }
-
-    /// Stores a value in the cache without acquiring a key lock.
-    ///
-    /// Intended for internal use when you already hold the lock.
-    ///
-    /// # Arguments
-    /// * `key` - Cache key.
-    /// * `value` - Serializable value to store.
-    /// * `ttl` - Expiration duration.
-    ///
-    /// # Errors
-    /// Returns an error if serialization or persistence fails.
-    pub fn set_without_guard<V: Serialize>(
-        &self,
-        key: &str,
-        value: V,
-        ttl: Duration,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let serialized = encode_to_vec(&value, Self::config())?;
-        let expires_at = now() + ttl.as_millis();
-
-        ENTRIES.insert(key.to_string(), (serialized,expires_at), );
-        EXPIRATION_QUEUE.insert( key.to_string(),expires_at);
         if self.config.persistent {
             self.persist_key(key)?;
         }
@@ -422,6 +330,7 @@ impl Cache {
     /// `Some(value)` if the entry exists and is valid, otherwise `None`.
     pub fn get<V: for<'de> Deserialize<'de>>(&self, key: &str) -> Option<V> {
         let now = now();
+
         ENTRIES.get(key).and_then(|entry| {
             if entry.1 > now {
                 decode_from_slice(&entry.0, Self::config())
@@ -433,13 +342,13 @@ impl Cache {
         })
     }
 
-
     /// Returns the remaining TTL for a given cache key.
     ///
     /// # Returns
     /// `Some(duration)` if the entry exists and is not expired, otherwise `None`.
     pub fn expire(&self, key: &str) -> Option<Duration> {
         let now = now();
+
         ENTRIES.get(key).and_then(|entry| {
             if entry.1 > now {
                 let remaining = entry.1 - now;
@@ -457,36 +366,11 @@ impl Cache {
     /// # Errors
     /// Returns an error if persistence fails.
     pub fn remove(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
-        {
-            let key_lock = KEY_LOCKS
-                .entry(key.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone();
-            let _guard = key_lock.lock().unwrap();
-
             ENTRIES.remove(key);
 
             if self.config.persistent {
                 self.persist_key(key)?;
             }
-        }
-        KEY_LOCKS.remove(key);
-
-        Ok(())
-    }
-
-    /// Removes an entry without acquiring the key lock.
-    ///
-    /// Used internally when the lock is already held.
-    ///
-    /// # Errors
-    /// Returns an error if persistence fails.
-    pub fn remove_without_guard(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
-        ENTRIES.remove(key);
-
-        if self.config.persistent {
-            self.persist_key(key)?;
-        }
 
         Ok(())
     }
@@ -497,7 +381,6 @@ impl Cache {
     /// Returns an error if persistent files cannot be deleted.
     pub fn clear(&self) -> Result<(), Box<dyn std::error::Error>> {
         ENTRIES.clear();
-        KEY_LOCKS.clear();
         FILE_LOCKS.clear();
 
         if self.config.persistent {
@@ -521,5 +404,28 @@ impl Cache {
     /// Checks whether the cache contains no entries.
     pub fn is_empty(&self) -> bool {
         ENTRIES.is_empty()
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        // Estimate ENTRIES memory usage
+        let entries_size = ENTRIES
+            .iter()
+            .fold(0, |acc, entry| {
+                acc + size_of_val(entry.key())
+                    + size_of_val(&entry.value().0)  // Serialized value size
+                    + size_of::<u128>()             // expires_at size
+                    + size_of::<String>()           // Overhead for String in DashMap
+            });
+
+        // Estimate FILE_LOCKS memory usage
+        let file_locks_size = FILE_LOCKS
+            .iter()
+            .fold(0, |acc, entry| {
+                acc + size_of_val(entry.key())
+                    + size_of::<Arc<Mutex<()>>>()   // Size of the lock structure
+                    + size_of::<String>()           // Overhead for String in DashMap
+            });
+
+        entries_size+file_locks_size
     }
 }

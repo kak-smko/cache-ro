@@ -67,9 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Customize cache behavior with `CacheConfig`:
 
 | Field                | Description                              | Default        |
-| -------------------- | ---------------------------------------- | -------------- |
+|----------------------|------------------------------------------|----------------|
 | `persistent`         | Enable or disable disk persistence       | `true`         |
 | `hash_prefix_length` | Number of hash bytes for filename prefix | `2`            |
+| `cleanup_interval`   | Cleanup the cache for expire keys        | `10s`          |
 | `dir_path`           | Directory path to store cache files      | `"cache_data"` |
 
 ---
@@ -91,10 +92,6 @@ Removes a key and its persisted data.
 ### `Cache::clear()`
 
 Clears all in-memory and persistent cache entries.
-
-### `Cache::get_key_lock(key)`
-
-Returns a lock object for atomic operations on a specific key.
 
 ---
 
